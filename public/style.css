@@ -17,8 +17,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .brand { font: 900 13px/1 var(--head); letter-spacing: .38em; color: var(--gold); }
 .title { font: 900 46px/1 var(--head); font-stretch: 75%; letter-spacing: .02em; margin: 0; }
 .sub { color: #cfe3d6; font-size: 14px; }
-.hero { display: flex; gap: 10px; margin: 6px 0; }
-.hero svg { width: 40px; height: 80px; filter: drop-shadow(0 4px 6px rgba(0,0,0,.4)); }
+.hero { display: flex; gap: 10px; margin: 6px 0; --t: 40px; }
+.hero svg { filter: drop-shadow(0 4px 6px rgba(0,0,0,.4)); }
 .hero svg:nth-child(1) { transform: rotate(-12deg); } .hero svg:nth-child(3) { transform: rotate(12deg); }
 .card { width: 100%; max-width: 380px; background: rgba(10, 36, 24, .55); border: 1px solid rgba(255,255,255,.08); border-radius: 18px; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
 .me-row { display: flex; align-items: center; gap: 12px; }
@@ -80,6 +80,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .status { text-align: center; min-height: 40px; font-size: 13px; color: #d6e6dc; }
 .status .big { font-weight: 800; color: #fff; font-size: 15px; }
 .hand { display: flex; flex-wrap: wrap; justify-content: center; gap: 7px; padding: 8px 0 14px; --t: 30px; min-height: 80px; }
+.hand { --t: 34px; }
 .hand button { border: 0; padding: 0; background: none; border-radius: 6px; transition: transform .12s; }
 .hand button.ok { outline: 2px solid rgba(232,199,100,.85); outline-offset: 2px; }
 .hand button.sel { transform: translateY(-10px); outline: 3px solid #fff; }

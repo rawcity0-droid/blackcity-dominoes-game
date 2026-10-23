@@ -41,7 +41,8 @@ function connect() {
 function send(m) { const s = JSON.stringify(m); if (ws && ws.readyState === 1) ws.send(s); else queue.push(s); }
 
 // ---------- faces ----------
-const myFace = () => state.face || seededCode(state.name || 'You');
+const validFace = (f) => isCustom(f) || PRESETS.some(([id]) => id === f);
+const myFace = () => (validFace(state.face) ? state.face : seededCode(state.name || 'You'));
 function facePhoto(face) {
   return h('img', { src: isCustom(face) ? avatarSrc(face) : `/faces/${face}.jpg`, alt: '', draggable: 'false' });
 }
