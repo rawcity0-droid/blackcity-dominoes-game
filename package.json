@@ -1,0 +1,17 @@
+{
+  "name": "blackcity-dominoes",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Blackcity Dominoes: All Fives (Muggins), double-six, 2 or 4 players vs computer players (free v1)",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server/index.ts",
+    "dev": "tsx watch src/server/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "screenshots": "tsx scripts/screenshots.ts"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": { "ws": "^8.18.0" },
+  "devDependencies": { "@types/node": "^20.19.0", "@types/ws": "^8.18.0", "tsx": "^4.19.0", "typescript": "^5.6.0", "puppeteer-core": "^23.0.0" }
+}
