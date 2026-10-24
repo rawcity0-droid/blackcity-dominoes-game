@@ -6,7 +6,7 @@ const $modal = document.getElementById('modal');
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
 
 const state = {
-  name: store.get('dom_name') || '',
+  name: '', // never prefilled: shared phones must not show the last player's name
   face: store.get('dom_face') || '',
   players: Number(store.get('dom_players')) === 2 ? 2 : 4,
   view: null,      // last table state from the server
@@ -70,7 +70,8 @@ const dbl = (t) => t[0] === t[1];
 // ---------- home ----------
 function renderHome() {
   const nameIn = h('input', { value: state.name, maxlength: '16', placeholder: 'Your name', 'aria-label': 'Your name' });
-  nameIn.addEventListener('input', () => { state.name = nameIn.value; store.set('dom_name', state.name); });
+  nameIn.addEventListener('input', () => { state.name = nameIn.value; });
+  try { localStorage.removeItem('dom_name'); } catch {} // clear names saved by older versions
   const seg = h('div', { class: 'seg' }, [4, 2].map((n) =>
     h('button', { type: 'button', class: state.players === n ? 'on' : '', text: n === 4 ? '4 players' : '2 players', onclick: () => { state.players = n; store.set('dom_players', String(n)); render(); } })));
   const me = h('button', { class: 'avatar big', type: 'button', 'aria-label': 'Customize your avatar', onclick: openAvatarBuilder }, facePhoto(myFace()));
@@ -118,10 +119,12 @@ function renderTable() {
   const myMoves = v.moves || [];
   const selMoves = state.selected ? myMoves.filter((m) => tid(m.tile) === state.selected) : [];
   center.append(boardEl(v.board, selMoves, v));
-  if (v.board.lead) center.append(h('div', { class: 'count', text: `Ends: ${countEnds(v.board)}` }));
-  if (v.n === 2) center.append(h('div', { class: 'yard', text: `Boneyard: ${v.boneyard}` }));
+  // Info strip sits above the table, so nothing ever covers the dominoes.
   const lp = v.lastPlay;
-  if (lp && lp.scored) center.append(h('div', { class: 'score-pop', text: `${who(v, lp.seat)} +${lp.scored}` }));
+  const info = h('div', { class: 'info' },
+    h('div', { class: 'yard', text: v.n === 2 ? `Boneyard: ${v.boneyard}` : '' }),
+    lp && lp.scored ? h('div', { class: 'score-pop', text: `${who(v, lp.seat)} +${lp.scored}` }) : h('div'),
+    h('div', { class: 'count', text: v.board.lead ? `Ends: ${countEnds(v.board)}` : '' }));
   if (v.result) felt.append(resultBanner(v));
 
   const mine = !v.watch && v.turn === 0 && !v.result;
@@ -129,7 +132,7 @@ function renderTable() {
     mine ? h('div', { class: 'big', text: myMoves.length ? (selMoves.length > 1 ? 'Tap an arrow to pick the end' : 'Your turn') : v.canDraw ? 'No play. Draw a tile.' : 'No play. Passing…' }) : null,
     h('div', { text: v.log[v.log.length - 1] || '' }));
 
-  const parts = [top, felt, status];
+  const parts = [top, info, felt, status];
   if (v.watch) {
     parts.push(h('div', { class: 'watch-hands' }, v.allHands.map((hand, i) =>
       h('div', { class: 'row' }, h('b', { text: v.seats[i].name }), hand.map((t) => svgEl(tileSvg(t[0], t[1])))))));
@@ -254,16 +257,25 @@ const overlaps = (items) => items.some((a, i) => items.some((b, j) => j > i && a
 function fitBoard(center) {
   const line = center.querySelector('.line');
   if (!line || !line._board) return;
-  const W = center.clientWidth - 8, H = center.clientHeight - 40;
+  const W = center.clientWidth - 8, H = center.clientHeight - 8;
   // Largest tile size (in px per unit) whose snaked layout fits the table without shrinking.
   let t, items;
   for (t = 52; ; t -= 2) {
-    let half = Math.max(3, Math.floor(W / t / 2));
-    items = layoutBoard(line._board, half);
-    for (let i = 0; i < 12 && overlaps(items); i++) items = layoutBoard(line._board, ++half);
+    // Try every turn width that fits the screen; take the first where no tiles collide.
+    const maxHalf = Math.max(3, Math.floor(W / t / 2));
+    let fallback = null;
+    items = null;
+    for (let half = 2; half <= maxHalf + 12; half++) {
+      const it = layoutBoard(line._board, half);
+      if (overlaps(it)) continue;
+      if (!fallback) fallback = it;
+      const w = Math.max(...it.map((i) => i.x + i.w)) - Math.min(...it.map((i) => i.x));
+      if (w * t <= W) { items = it; } else if (items) break;
+    }
+    items = items || fallback || layoutBoard(line._board, maxHalf);
     const bw = Math.max(...items.map((i) => i.x + i.w)) - Math.min(...items.map((i) => i.x));
     const bh = Math.max(...items.map((i) => i.y + i.h)) - Math.min(...items.map((i) => i.y));
-    if (t <= 20 || (bw * t <= W && bh * t <= H)) break;
+    if (t <= 32 || (bw * t <= W && bh * t <= H)) break;
   }
   const x0 = Math.min(...items.map((i) => i.x)), y0 = Math.min(...items.map((i) => i.y));
   const bw = Math.max(...items.map((i) => i.x + i.w)) - x0, bh = Math.max(...items.map((i) => i.y + i.h)) - y0;
@@ -274,8 +286,8 @@ function fitBoard(center) {
     if (it.btn) Object.assign(el.style, { minWidth: '0', minHeight: '0', fontSize: `${Math.round(t * 0.5)}px` });
     line.append(el);
   }
-  const k = Math.min(1, W / (bw * t), H / (bh * t));
-  line.style.transform = k < 1 ? `scale(${k})` : '';
+  // Tiles never go below 32px; if a very long line still doesn't fit, the table scrolls instead of shrinking.
+  center.classList.toggle('scroll', bw * t > W || bh * t > H);
 }
 
 function resultBanner(v) {
