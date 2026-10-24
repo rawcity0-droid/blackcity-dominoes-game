@@ -6,9 +6,11 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const browser = await puppeteer.launch({ executablePath: '/usr/bin/google-chrome', headless: true, args: ['--no-sandbox', '--disable-gpu'] });
 console.log('launched');
+const VP = process.env.VP === 'tablet' ? { width: 820, height: 1180, isMobile: true } : { width: 390, height: 844, isMobile: true };
+const TAG = process.env.TAG ?? '';
 async function page(players: 2 | 4) {
   const p = await browser.newPage();
-  await p.setViewport({ width: 390, height: 844, deviceScaleFactor: 2, isMobile: true, hasTouch: true });
+  await p.setViewport({ ...VP, deviceScaleFactor: 2, hasTouch: true });
   p.on('pageerror', (e) => console.log('PAGE ERROR', e.message));
   await p.goto(BASE, { waitUntil: 'load', timeout: 15000 });
   await p.evaluate((n) => { localStorage.setItem('dom_name', 'Raw'); localStorage.setItem('dom_face', 'c81401110330320'); localStorage.setItem('dom_players', String(n)); }, players);
@@ -29,7 +31,7 @@ async function autoplay(p: any, ms: number) {
   }
 }
 async function waitMyTurn(p: any) { for (let i = 0; i < 30 && !(await p.$('.hand button.ok')); i++) await sleep(300); }
-const shot = async (p: any, name: string) => { await p.screenshot({ path: `${OUT}/dominoes_${name}.png` }); console.log('saved', name); };
+const shot = async (p: any, name: string) => { await p.screenshot({ path: `${OUT}/dominoes_${TAG}${name}.png` }); console.log('saved', name); };
 
 const home = await page(4); await shot(home, 'home');
 await home.click('.me-row .avatar'); await sleep(400); await shot(home, 'avatar'); await home.close();
@@ -37,7 +39,7 @@ await home.click('.me-row .avatar'); await sleep(400); await shot(home, 'avatar'
 const p4 = await page(4);
 await p4.evaluate(() => (window as any).__dom.start('play'));
 await autoplay(p4, 12000); await waitMyTurn(p4);
-await shot(p4, '4player'); await p4.close();
+await shot(p4, '4player'); await autoplay(p4, 14000); await waitMyTurn(p4); await shot(p4, '4player_late'); await p4.close();
 
 const p2 = await page(2);
 await p2.evaluate(() => (window as any).__dom.start('play'));

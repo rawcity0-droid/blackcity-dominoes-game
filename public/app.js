@@ -173,41 +173,109 @@ function countEnds(b) {
   return s;
 }
 
-/** Left arm, lead, right arm in a row. The spinner holds a column with its up and down branches. */
+/** Board pieces: lead, left/right arms (these snake at the table edges), spinner up/down branches. Positions are set in fitBoard. */
 function boardEl(b, selMoves, v) {
   const line = h('div', { class: 'line' });
   if (!b.lead) {
+    line.classList.add('empty');
     line.append(selMoves.length || (v.moves || []).length ? h('div', { class: 'tiny', text: 'Tap a domino to lead' }) : h('div', { class: 'tiny', text: 'Waiting for the first domino…' }));
     return line;
   }
-  const endBtn = (arm) => selMoves.some((m) => m.arm === arm) ? h('button', { class: 'end-btn', type: 'button', text: { L: '◀', R: '▶', N: '▲', S: '▼' }[arm], 'aria-label': 'Place it here', onclick: () => playAt(arm) }) : null;
   const lastId = v.lastPlay && v.lastPlay.tile ? tid(v.lastPlay.tile) : '';
-  const cls = (t) => (tid(t) === lastId ? 'new' : '');
   const sp = b.spinner;
-  const items = [];
-  b.arms.L.forEach((p, idx) => items.unshift({ el: svgEl(tileSvg(p.open, inner(p), dbl(p.tile), cls(p.tile))), spin: sp && sp !== 'C' && sp.arm === 'L' && sp.index === idx }));
-  items.push({ el: svgEl(tileSvg(b.lead[0], b.lead[1], dbl(b.lead), cls(b.lead))), spin: sp === 'C' });
-  b.arms.R.forEach((p, idx) => items.push({ el: svgEl(tileSvg(inner(p), p.open, dbl(p.tile), cls(p.tile))), spin: sp && sp !== 'C' && sp.arm === 'R' && sp.index === idx }));
-  line.append(endBtn('L') || '');
-  for (const it of items) {
-    if (!it.spin) { line.append(it.el); continue; }
-    const up = h('div', { class: 'arm up' }, endBtn('N'));
-    b.arms.N.slice().reverse().forEach((p) => up.append(svgEl(tileSvg(p.open, inner(p), !dbl(p.tile), cls(p.tile)))));
-    const down = h('div', { class: 'arm down' });
-    b.arms.S.forEach((p) => down.append(svgEl(tileSvg(inner(p), p.open, !dbl(p.tile), cls(p.tile)))));
-    down.append(endBtn('S') || '');
-    line.append(h('div', { class: 'col' }, up, it.el, down));
-  }
-  line.append(endBtn('R') || '');
+  const piece = (p) => ({ a: inner(p), b: p.open, d: dbl(p.tile), cls: tid(p.tile) === lastId ? 'new' : '' });
+  line._board = {
+    lead: { a: b.lead[0], b: b.lead[1], d: dbl(b.lead), cls: tid(b.lead) === lastId ? 'new' : '', spin: sp === 'C' },
+    L: b.arms.L.map((p, i) => ({ ...piece(p), spin: !!sp && sp !== 'C' && sp.arm === 'L' && sp.index === i })),
+    R: b.arms.R.map((p, i) => ({ ...piece(p), spin: !!sp && sp !== 'C' && sp.arm === 'R' && sp.index === i })),
+    N: b.arms.N.map(piece), S: b.arms.S.map(piece),
+    btn: (arm) => selMoves.some((m) => m.arm === arm) ? h('button', { class: 'end-btn', type: 'button', text: { L: '◀', R: '▶', N: '▲', S: '▼' }[arm], 'aria-label': 'Place it here', onclick: () => playAt(arm) }) : null,
+  };
   return line;
 }
 
-/** Shrink the board so the whole layout fits on the table. */
+/** Lay the board out in tile units (1 unit = short side of a domino). Left/right arms turn at ±half so they snake. */
+function layoutBoard(B, half) {
+  const out = []; // {x, y, w, h, svg | btn}
+  const put = (x, y, w, hh, p, vert, flip) => out.push({ x, y, w, h: hh, svg: tileSvg(flip ? p.b : p.a, flip ? p.a : p.b, vert, p.cls) });
+  let spinAt = null;
+  const L0 = B.lead;
+  if (L0.d) put(-0.5, -1, 1, 2, L0, true, false); else put(-1, -0.5, 2, 1, L0, false, false);
+  if (L0.spin) spinAt = { x: 0, top: -1, bot: 1 };
+  const edge = L0.d ? 0.5 : 1;
+  // dir: +1 right / -1 left; turn: +1 down / -1 up
+  const arm = (tiles, dir, turn, key) => {
+    const out0 = dir;
+    let cx = dir * edge, cy = 0;
+    // Rows heading back toward the middle stop short of the spinner column so they never hit its up/down branches.
+    const limit = (d) => (d === out0 ? d * half : spinAt && (spinAt.x - cx) * out0 < 0 ? spinAt.x + out0 : d * half);
+    for (const p of tiles) {
+      const len = p.d ? 1 : 2;
+      const far = cx + dir * len;
+      if (!p.spin && !p.d && (dir > 0 ? far > limit(dir) : far < limit(dir))) {
+        // corner: vertical tile hanging off the end, then reverse direction one row over
+        const x = dir > 0 ? cx - 1 : cx;
+        const y = turn > 0 ? cy + 0.5 : cy - 2.5;
+        put(x, y, 1, 2, p, true, turn < 0);
+        cy += turn * 2; cx = dir > 0 ? cx - 1 : cx + 1; dir = -dir;
+        continue;
+      }
+      if (p.d) {
+        const x = dir > 0 ? cx : cx - 1;
+        put(x, cy - 1, 1, 2, p, true, false);
+        if (p.spin) spinAt = { x: x + 0.5, top: cy - 1, bot: cy + 1 };
+      } else {
+        put(dir > 0 ? cx : cx - 2, cy - 0.5, 2, 1, p, false, dir < 0);
+      }
+      cx += dir * len;
+    }
+    const b = B.btn(key);
+    if (b) out.push({ x: dir > 0 ? cx + 0.1 : cx - 1.1, y: cy - 0.5, w: 1, h: 1, btn: b });
+  };
+  // Lay the arm holding the spinner first so the other arm knows where its branches are.
+  if (B.R.some((p) => p.spin)) { arm(B.R, 1, 1, 'R'); arm(B.L, -1, -1, 'L'); } else { arm(B.L, -1, -1, 'L'); arm(B.R, 1, 1, 'R'); }
+  if (spinAt) {
+    const branch = (tiles, s, key) => {
+      let y = s < 0 ? spinAt.top : spinAt.bot;
+      for (const p of tiles) {
+        if (p.d) { put(spinAt.x - 1, s < 0 ? y - 1 : y, 2, 1, p, false, false); y += s; }
+        else { put(spinAt.x - 0.5, s < 0 ? y - 2 : y, 1, 2, p, true, s < 0); y += 2 * s; }
+      }
+      const b = B.btn(key);
+      if (b) out.push({ x: spinAt.x - 0.5, y: s < 0 ? y - 1.1 : y + 0.1, w: 1, h: 1, btn: b });
+    };
+    branch(B.N, -1, 'N'); branch(B.S, 1, 'S');
+  }
+  return out;
+}
+const overlaps = (items) => items.some((a, i) => items.some((b, j) => j > i && a.x < b.x + b.w - 0.01 && b.x < a.x + a.w - 0.01 && a.y < b.y + b.h - 0.01 && b.y < a.y + a.h - 0.01));
+
+/** Pick a tile size from the table, snake the arms to fit the width, and only shrink as a last resort. */
 function fitBoard(center) {
   const line = center.querySelector('.line');
-  if (!line) return;
-  const k = Math.min(1.25, (center.clientWidth - 8) / line.scrollWidth, (center.clientHeight - 36) / line.scrollHeight);
-  line.style.transform = `scale(${k})`;
+  if (!line || !line._board) return;
+  const W = center.clientWidth - 8, H = center.clientHeight - 40;
+  // Largest tile size (in px per unit) whose snaked layout fits the table without shrinking.
+  let t, items;
+  for (t = 52; ; t -= 2) {
+    let half = Math.max(3, Math.floor(W / t / 2));
+    items = layoutBoard(line._board, half);
+    for (let i = 0; i < 12 && overlaps(items); i++) items = layoutBoard(line._board, ++half);
+    const bw = Math.max(...items.map((i) => i.x + i.w)) - Math.min(...items.map((i) => i.x));
+    const bh = Math.max(...items.map((i) => i.y + i.h)) - Math.min(...items.map((i) => i.y));
+    if (t <= 20 || (bw * t <= W && bh * t <= H)) break;
+  }
+  const x0 = Math.min(...items.map((i) => i.x)), y0 = Math.min(...items.map((i) => i.y));
+  const bw = Math.max(...items.map((i) => i.x + i.w)) - x0, bh = Math.max(...items.map((i) => i.y + i.h)) - y0;
+  line.style.width = `${bw * t}px`; line.style.height = `${bh * t}px`; line.style.setProperty('--t', `${t}px`);
+  for (const it of items) {
+    const el = it.btn || svgEl(it.svg);
+    Object.assign(el.style, { position: 'absolute', left: `${(it.x - x0) * t}px`, top: `${(it.y - y0) * t}px`, width: `${it.w * t}px`, height: `${it.h * t}px` });
+    if (it.btn) Object.assign(el.style, { minWidth: '0', minHeight: '0', fontSize: `${Math.round(t * 0.5)}px` });
+    line.append(el);
+  }
+  const k = Math.min(1, W / (bw * t), H / (bh * t));
+  line.style.transform = k < 1 ? `scale(${k})` : '';
 }
 
 function resultBanner(v) {
