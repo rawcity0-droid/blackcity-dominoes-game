@@ -1,9 +1,10 @@
 // Blackcity Dominoes client: home screen, avatar builder, and the table. The server runs the game.
+import { boardPieces, fitLayout } from './board-layout.js';
 import { PARTS, PRESETS, avatarSrc, decode, encode, isCustom, randomCode, seededCode } from './avatar.js';
 
 const $app = document.getElementById('app');
 const $modal = document.getElementById('modal');
-const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }, del: (k) => { try { localStorage.removeItem(k); } catch {} } };
 
 const state = {
   name: '', // never prefilled: shared phones must not show the last player's name
@@ -12,6 +13,10 @@ const state = {
   view: null,      // last table state from the server
   screen: 'home',
   selected: null,  // tile picked from my hand when it fits more than one end
+  lobby: null,     // join-code table waiting to start
+  owner: false,    // owner mode on this device (hidden panel + OWNER_CODE)
+  ownerAvailable: false,
+  joinCode: '',
 };
 
 /** Tiny element helper. */
@@ -35,8 +40,34 @@ const queue = [];
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => { while (queue.length) ws.send(queue.shift()); };
-  ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.t === 'state') { state.view = m; if (state.screen === 'table') render(); } };
-  ws.onclose = () => { setTimeout(connect, 1500); if (state.screen === 'table') { state.screen = 'home'; render(); } };
+  ws.onmessage = (e) => onMessage(JSON.parse(e.data));
+  ws.onclose = () => { setTimeout(connect, 1500); if (state.screen !== 'home') { state.screen = 'home'; toast('Connection lost. Back at the menu.'); render(); } };
+}
+function onMessage(m) {
+  switch (m.t) {
+    case 'hello': { // fresh connection: show the saved owner pass, if any
+      state.ownerAvailable = m.ownerAvailable;
+      const pass = store.get('dom_owner');
+      if (pass) send({ t: 'ownerPass', pass }); else state.owner = false;
+      return;
+    }
+    case 'ownerStatus':
+      state.owner = m.owner;
+      if (!m.owner) store.del('dom_owner');
+      if (state.screen === 'home') render();
+      return;
+    case 'ownerResult': onOwnerResult(m); return;
+    case 'state': state.view = m; state.lobby = null; if (state.screen !== 'home') { state.screen = 'table'; render(); } return;
+    case 'lobby': state.lobby = m; if (state.screen !== 'home') { state.screen = 'lobby'; render(); } return;
+    case 'joinResult': if (!m.ok) { state.screen = 'home'; toast(m.message); render(); } return;
+    case 'closed': case 'error': state.screen = 'home'; toast(m.message); render(); return;
+  }
+}
+function toast(text) {
+  document.querySelector('.toast')?.remove();
+  const el = h('div', { class: 'toast', role: 'status', text });
+  document.body.append(el);
+  setTimeout(() => el.remove(), 3500);
 }
 function send(m) { const s = JSON.stringify(m); if (ws && ws.readyState === 1) ws.send(s); else queue.push(s); }
 
@@ -77,7 +108,7 @@ function renderHome() {
   const me = h('button', { class: 'avatar big', type: 'button', 'aria-label': 'Customize your avatar', onclick: openAvatarBuilder }, facePhoto(myFace()));
   $app.replaceChildren(h('div', { class: 'home' },
     h('div', { class: 'brand', text: 'BLACKCITY' }),
-    h('h1', { class: 'title', text: 'DOMINOES' }),
+    h('h1', { class: 'title', text: 'DOMINOES', onclick: ownerTap }),
     h('div', { class: 'hero' }, svgEl(tileSvg(6, 6, true)), svgEl(tileSvg(5, 0, true)), svgEl(tileSvg(3, 2, true))),
     h('div', { class: 'sub', text: 'All Fives · Double-six · 7 tiles each' }),
     h('div', { class: 'card' },
@@ -86,7 +117,9 @@ function renderHome() {
       h('div', { class: 'lab', text: 'Table' }), seg,
       h('div', { class: 'tiny', text: state.players === 4 ? 'You and your partner (across) vs. two players. All tiles dealt, no boneyard.' : 'Head to head. 14 tiles in the boneyard to draw from.' }),
       btn('gold', 'Play', () => start('play')),
-      btn('outline', 'Watch a table', () => start('watch'))),
+      btn('outline', 'Watch a table', () => start('watch')),
+      state.owner ? btn('outline owner', `Host a table with a code (${state.players} players)`, host) : null,
+      h('div', { class: 'lab', text: 'Have a code?' }), joinRow()),
     h('div', { class: 'tiny', text: 'Score when the open ends add up to 5, 10, 15… First to 150 wins.' })));
 }
 
@@ -95,11 +128,78 @@ function start(mode) {
   send({ t: 'start', mode, players: state.players, name: state.name || 'You', face: myFace() });
   render();
 }
+function joinRow() {
+  const input = h('input', { class: 'code-in', value: state.joinCode, maxlength: '5', placeholder: 'CODE', autocapitalize: 'characters', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Table code' });
+  input.addEventListener('input', () => { input.value = input.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5); state.joinCode = input.value; });
+  const go = () => {
+    if (input.value.length < 5) { toast('Enter the 5-character code.'); input.focus(); return; }
+    state.screen = 'lobby'; state.lobby = null; state.view = null; state.selected = null;
+    send({ t: 'join', code: input.value, name: state.name || 'Player', face: myFace() });
+    render();
+  };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  return h('div', { class: 'join-row' }, input, btn('gold small', 'Join', go));
+}
+function host() {
+  state.screen = 'lobby'; state.lobby = null; state.view = null; state.selected = null;
+  send({ t: 'host', players: state.players, name: state.name || 'Host', face: myFace() });
+  render();
+}
+
+// Hidden owner panel: 3 taps on the DOMINOES title within 2 seconds (same as Blackcity Spades). Nothing on screen points to it.
+let ownerTaps = [];
+function ownerTap() {
+  const now = Date.now();
+  ownerTaps = ownerTaps.filter((t) => now - t < 2000);
+  ownerTaps.push(now);
+  if (ownerTaps.length >= 3) { ownerTaps = []; openOwnerPanel(); }
+}
+let ownerMsg = null;
+function openOwnerPanel() {
+  const input = h('input', { type: 'text', id: 'owner-code', inputmode: 'numeric', pattern: '[0-9]*', maxlength: '6', autocomplete: 'off', 'aria-label': 'Owner code' });
+  const msg = h('div', { class: 'field-error', role: 'alert' });
+  ownerMsg = (text) => { msg.textContent = text || ''; };
+  const go = () => {
+    const code = input.value.trim();
+    if (!/^\d{6}$/.test(code)) { ownerMsg('Enter the 6-digit code.'); return; }
+    ownerMsg('Checking…'); send({ t: 'owner', code }); input.value = '';
+  };
+  input.addEventListener('input', () => { input.value = input.value.replace(/\D/g, '').slice(0, 6); ownerMsg(''); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
+  const rows = state.owner
+    ? [h('p', { text: 'Owner mode is on for this device. You can host tables with a join code.' }), h('div', { class: 'av-actions' }, btn('outline small', 'Turn off on this device', () => { store.del('dom_owner'); state.owner = false; send({ t: 'ownerPass', pass: '' }); closeModal(); render(); }), btn('gold small', 'Close', closeModal))]
+    : [input, msg, h('div', { class: 'av-actions' }, btn('gold', 'Unlock', go), btn('outline small', 'Close', closeModal))];
+  $modal.replaceChildren(h('div', { class: 'sheet small' }, h('h2', { text: 'Owner' }), ...rows));
+  $modal.classList.remove('hidden');
+  if (!state.owner) input.focus();
+}
+function onOwnerResult(m) {
+  if (m.ok) {
+    store.set('dom_owner', m.pass);
+    state.owner = true; closeModal(); toast(m.message); render();
+  } else if (ownerMsg) ownerMsg(m.message);
+}
+
+// ---------- lobby (join-code table before it starts) ----------
+function renderLobby() {
+  const l = state.lobby;
+  if (!l) { $app.replaceChildren(h('div', { class: 'home' }, h('div', { class: 'sub', text: 'Connecting…' }), btn('outline small', 'Back', toMenu))); return; }
+  $app.replaceChildren(h('div', { class: 'home lobby' },
+    h('div', { class: 'brand', text: 'BLACKCITY' }),
+    h('div', { class: 'sub', text: l.host ? 'Share this code. Each person who joins takes a computer player’s seat.' : 'You’re in. Waiting for the host to start.' }),
+    h('div', { class: 'join-code', 'aria-label': 'Table code', text: l.code }),
+    h('div', { class: 'card' },
+      h('div', { class: 'lab', text: `${l.n}-player table` }),
+      l.seats.map((s) => h('div', { class: 'lobby-seat' }, avatar(s.face), h('b', { text: s.name }), h('span', { class: 'tiny', text: s.host ? 'Host' : s.human ? 'Joined' : 'Computer' }))),
+      l.host ? btn('gold', 'Start game', () => send({ t: 'begin' })) : null,
+      btn('outline small', 'Leave', toMenu))));
+}
+
 function toMenu() { send({ t: 'leave' }); state.screen = 'home'; render(); }
 
 // ---------- table ----------
 const seatPos = (v, i) => (v.n === 2 ? (i === 0 ? 's' : 'n') : ['s', 'w', 'n', 'e'][i]);
-const who = (v, i) => (v.seats[i].human ? 'You' : v.seats[i].name);
+const who = (v, i) => v.seats[i].name; // the server already says "You" for your own seat
 
 function renderTable() {
   const v = state.view;
@@ -112,7 +212,7 @@ function renderTable() {
   const felt = h('div', { class: 'felt' });
   v.seats.forEach((s, i) => {
     felt.append(h('div', { class: `pill ${seatPos(v, i)}` + (v.turn === i && !v.result ? ' turn' : '') },
-      avatar(s.face), h('div', {}, h('div', { class: 'pname', text: s.human ? 'You' : s.name }), h('div', { class: 'pstat', text: `${s.count} tile${s.count === 1 ? '' : 's'}` }))));
+      avatar(s.face), h('div', {}, h('div', { class: 'pname', text: s.name }), h('div', { class: 'pstat', text: `${s.count} tile${s.count === 1 ? '' : 's'}` }))));
   });
   const center = h('div', { class: 'center' });
   felt.append(center);
@@ -176,7 +276,7 @@ function countEnds(b) {
   return s;
 }
 
-/** Board pieces: lead, left/right arms (these snake at the table edges), spinner up/down branches. Positions are set in fitBoard. */
+/** Board: the server board turned into pieces; fitBoard lays them out once the table size is known. */
 function boardEl(b, selMoves, v) {
   const line = h('div', { class: 'line' });
   if (!b.lead) {
@@ -185,109 +285,35 @@ function boardEl(b, selMoves, v) {
     return line;
   }
   const lastId = v.lastPlay && v.lastPlay.tile ? tid(v.lastPlay.tile) : '';
-  const sp = b.spinner;
-  const piece = (p) => ({ a: inner(p), b: p.open, d: dbl(p.tile), cls: tid(p.tile) === lastId ? 'new' : '' });
-  line._board = {
-    lead: { a: b.lead[0], b: b.lead[1], d: dbl(b.lead), cls: tid(b.lead) === lastId ? 'new' : '', spin: sp === 'C' },
-    L: b.arms.L.map((p, i) => ({ ...piece(p), spin: !!sp && sp !== 'C' && sp.arm === 'L' && sp.index === i })),
-    R: b.arms.R.map((p, i) => ({ ...piece(p), spin: !!sp && sp !== 'C' && sp.arm === 'R' && sp.index === i })),
-    N: b.arms.N.map(piece), S: b.arms.S.map(piece),
-    btn: (arm) => selMoves.some((m) => m.arm === arm) ? h('button', { class: 'end-btn', type: 'button', text: { L: '◀', R: '▶', N: '▲', S: '▼' }[arm], 'aria-label': 'Place it here', onclick: () => playAt(arm) }) : null,
-  };
+  line._board = boardPieces(b, lastId, (arm) => selMoves.some((m) => m.arm === arm));
   return line;
 }
 
-/** Lay the board out in tile units (1 unit = short side of a domino). Left/right arms turn at ±half so they snake. */
-function layoutBoard(B, half) {
-  const out = []; // {x, y, w, h, svg | btn}
-  const put = (x, y, w, hh, p, vert, flip) => out.push({ x, y, w, h: hh, svg: tileSvg(flip ? p.b : p.a, flip ? p.a : p.b, vert, p.cls) });
-  let spinAt = null;
-  const L0 = B.lead;
-  if (L0.d) put(-0.5, -1, 1, 2, L0, true, false); else put(-1, -0.5, 2, 1, L0, false, false);
-  if (L0.spin) spinAt = { x: 0, top: -1, bot: 1 };
-  const edge = L0.d ? 0.5 : 1;
-  // dir: +1 right / -1 left; turn: +1 down / -1 up
-  const arm = (tiles, dir, turn, key) => {
-    const out0 = dir;
-    let cx = dir * edge, cy = 0;
-    // Rows heading back toward the middle stop short of the spinner column so they never hit its up/down branches.
-    const limit = (d) => (d === out0 ? d * half : spinAt && (spinAt.x - cx) * out0 < 0 ? spinAt.x + out0 : d * half);
-    for (const p of tiles) {
-      const len = p.d ? 1 : 2;
-      const far = cx + dir * len;
-      if (!p.spin && !p.d && (dir > 0 ? far > limit(dir) : far < limit(dir))) {
-        // corner: vertical tile hanging off the end, then reverse direction one row over
-        const x = dir > 0 ? cx - 1 : cx;
-        const y = turn > 0 ? cy + 0.5 : cy - 2.5;
-        put(x, y, 1, 2, p, true, turn < 0);
-        cy += turn * 2; cx = dir > 0 ? cx - 1 : cx + 1; dir = -dir;
-        continue;
-      }
-      if (p.d) {
-        const x = dir > 0 ? cx : cx - 1;
-        put(x, cy - 1, 1, 2, p, true, false);
-        if (p.spin) spinAt = { x: x + 0.5, top: cy - 1, bot: cy + 1 };
-      } else {
-        put(dir > 0 ? cx : cx - 2, cy - 0.5, 2, 1, p, false, dir < 0);
-      }
-      cx += dir * len;
-    }
-    const b = B.btn(key);
-    if (b) out.push({ x: dir > 0 ? cx + 0.1 : cx - 1.1, y: cy - 0.5, w: 1, h: 1, btn: b });
-  };
-  // Lay the arm holding the spinner first so the other arm knows where its branches are.
-  if (B.R.some((p) => p.spin)) { arm(B.R, 1, 1, 'R'); arm(B.L, -1, -1, 'L'); } else { arm(B.L, -1, -1, 'L'); arm(B.R, 1, 1, 'R'); }
-  if (spinAt) {
-    const branch = (tiles, s, key) => {
-      let y = s < 0 ? spinAt.top : spinAt.bot;
-      for (const p of tiles) {
-        if (p.d) { put(spinAt.x - 1, s < 0 ? y - 1 : y, 2, 1, p, false, false); y += s; }
-        else { put(spinAt.x - 0.5, s < 0 ? y - 2 : y, 1, 2, p, true, s < 0); y += 2 * s; }
-      }
-      const b = B.btn(key);
-      if (b) out.push({ x: spinAt.x - 0.5, y: s < 0 ? y - 1.1 : y + 0.1, w: 1, h: 1, btn: b });
-    };
-    branch(B.N, -1, 'N'); branch(B.S, 1, 'S');
-  }
-  return out;
-}
-const overlaps = (items) => items.some((a, i) => items.some((b, j) => j > i && a.x < b.x + b.w - 0.01 && b.x < a.x + a.w - 0.01 && a.y < b.y + b.h - 0.01 && b.y < a.y + a.h - 0.01));
-
-/** Pick a tile size from the table, snake the arms to fit the width, and only shrink as a last resort. */
+/** Snake the board into the table and size tiles as big as fit (max 52px a unit). The whole board always shows. */
 function fitBoard(center) {
   const line = center.querySelector('.line');
   if (!line || !line._board) return;
   const W = center.clientWidth - 8, H = center.clientHeight - 8;
-  // Largest tile size (in px per unit) whose snaked layout fits the table without shrinking.
-  let t, items;
-  for (t = 52; ; t -= 2) {
-    // Try every turn width that fits the screen; take the first where no tiles collide.
-    const maxHalf = Math.max(3, Math.floor(W / t / 2));
-    let fallback = null;
-    items = null;
-    for (let half = 2; half <= maxHalf + 12; half++) {
-      const it = layoutBoard(line._board, half);
-      if (overlaps(it)) continue;
-      if (!fallback) fallback = it;
-      const w = Math.max(...it.map((i) => i.x + i.w)) - Math.min(...it.map((i) => i.x));
-      if (w * t <= W) { items = it; } else if (items) break;
-    }
-    items = items || fallback || layoutBoard(line._board, maxHalf);
-    const bw = Math.max(...items.map((i) => i.x + i.w)) - Math.min(...items.map((i) => i.x));
-    const bh = Math.max(...items.map((i) => i.y + i.h)) - Math.min(...items.map((i) => i.y));
-    if (t <= 32 || (bw * t <= W && bh * t <= H)) break;
-  }
+  const { t, items, b } = fitLayout(line._board, W, H, 52);
   const x0 = Math.min(...items.map((i) => i.x)), y0 = Math.min(...items.map((i) => i.y));
-  const bw = Math.max(...items.map((i) => i.x + i.w)) - x0, bh = Math.max(...items.map((i) => i.y + i.h)) - y0;
-  line.style.width = `${bw * t}px`; line.style.height = `${bh * t}px`; line.style.setProperty('--t', `${t}px`);
+  line.style.width = `${b.w * t}px`; line.style.height = `${b.h * t}px`; line.style.setProperty('--t', `${t}px`);
   for (const it of items) {
-    const el = it.btn || svgEl(it.svg);
+    let el;
+    if (it.btn) {
+      const arm = it.btn;
+      el = h('button', { class: 'end-btn', type: 'button', text: { L: '◀', R: '▶', N: '▲', S: '▼' }[arm], 'aria-label': 'Place it here', onclick: () => playAt(arm) });
+    } else {
+      const p = it.p;
+      el = svgEl(tileSvg(it.flip ? p.b : p.a, it.flip ? p.a : p.b, it.vert, p.cls));
+    }
     Object.assign(el.style, { position: 'absolute', left: `${(it.x - x0) * t}px`, top: `${(it.y - y0) * t}px`, width: `${it.w * t}px`, height: `${it.h * t}px` });
-    if (it.btn) Object.assign(el.style, { minWidth: '0', minHeight: '0', fontSize: `${Math.round(t * 0.5)}px` });
+    // End buttons stay finger-sized even when tiles shrink: centered on their spot.
+    if (it.btn) {
+      const s = Math.max(t, 30);
+      Object.assign(el.style, { left: `${(it.x - x0 + 0.5) * t - s / 2}px`, top: `${(it.y - y0 + 0.5) * t - s / 2}px`, width: `${s}px`, height: `${s}px`, minWidth: '0', minHeight: '0', fontSize: `${Math.round(s * 0.5)}px`, zIndex: 2 });
+    }
     line.append(el);
   }
-  // Tiles never go below 32px; if a very long line still doesn't fit, the table scrolls instead of shrinking.
-  center.classList.toggle('scroll', bw * t > W || bh * t > H);
 }
 
 function resultBanner(v) {
@@ -343,8 +369,8 @@ function openAvatarBuilder() {
 function closeModal() { $modal.classList.add('hidden'); $modal.replaceChildren(); }
 $modal.addEventListener('click', (e) => { if (e.target === $modal) closeModal(); });
 
-function render() { if (state.screen === 'home') renderHome(); else renderTable(); }
+function render() { if (state.screen === 'home') renderHome(); else if (state.screen === 'lobby') renderLobby(); else renderTable(); }
 window.addEventListener('resize', () => { if (state.screen === 'table') render(); });
 connect();
 render();
-window.__dom = { state, start };
+window.__dom = { state, start, host };

@@ -1,5 +1,6 @@
-// One table for one connection: the human (or nobody, in watch mode) plus computer players.
-// Runs the game with short pauses so moves are easy to follow, and sends a view after every change.
+// One table: humans (one, or several on a join-code table) plus computer players.
+// Runs the game with short pauses so moves are easy to follow, and sends each person their own view after every change.
+// Views are turned so the viewer is always seat 0 (bottom) and their team is always team 0.
 
 import { Game, Move, Tile, chooseMove, sameTile } from '../engine/dominoes.js';
 import { Persona, pickPersona } from './personas.js';
@@ -7,41 +8,110 @@ import { Persona, pickPersona } from './personas.js';
 export interface Timings { botMs: number; handPauseMs: number }
 export const DEFAULT_TIMINGS: Timings = { botMs: 900, handPauseMs: 4500 };
 
-export interface Seat extends Persona { human: boolean }
+export type Send = (msg: unknown) => void;
+export interface Seat extends Persona { human: boolean; send?: Send; host?: boolean }
 
 export class Table {
   game: Game;
   seats: Seat[];
   watch: boolean;
+  /** Join code (code tables only). */
+  code: string | null;
+  /** Code tables wait in a lobby until the host starts. */
+  started: boolean;
   log: string[] = [];
   private timer: NodeJS.Timeout | null = null;
-  private closed = false;
+  closed = false;
+  private watcher: Send | null = null;
+  private onEmpty: () => void;
 
-  constructor(opts: { players: 2 | 4; watch: boolean; me?: Persona; target?: number }, private send: (msg: unknown) => void, private t: Timings = DEFAULT_TIMINGS) {
+  constructor(
+    opts: { players: 2 | 4; watch: boolean; me?: Persona; target?: number; code?: string; onEmpty?: () => void },
+    send: Send,
+    private t: Timings = DEFAULT_TIMINGS,
+  ) {
     this.watch = opts.watch;
+    this.code = opts.code ?? null;
+    this.onEmpty = opts.onEmpty ?? (() => {});
     this.game = new Game(opts.players, { target: opts.target });
     const used = new Set<string>(opts.me ? [opts.me.name] : []);
     this.seats = [];
     for (let i = 0; i < opts.players; i++) {
-      if (i === 0 && !opts.watch && opts.me) { this.seats.push({ ...opts.me, human: true }); continue; }
+      if (i === 0 && !opts.watch && opts.me) { this.seats.push({ ...opts.me, human: true, send, host: true }); continue; }
       const p = pickPersona(used); used.add(p.name);
       this.seats.push({ ...p, human: false });
     }
+    if (opts.watch) this.watcher = send;
+    this.started = !this.code;
+    if (this.started) this.newHand(); else this.push();
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.onEmpty();
+  }
+
+  /** Host starts a code table. Seats nobody joined stay computer players. */
+  begin(send: Send): void {
+    if (this.closed || this.started || this.seats[0].send !== send) return;
+    this.started = true;
     this.newHand();
   }
 
-  close(): void { this.closed = true; if (this.timer) clearTimeout(this.timer); }
+  /** A person with the code takes the first computer seat. Returns false if the table is full. */
+  join(me: Persona, send: Send): boolean {
+    if (this.closed || !this.code) return false;
+    const i = this.seats.findIndex((s) => !s.human);
+    if (i < 0) return false;
+    let name = me.name;
+    for (let k = 2; this.seats.some((s) => s.name === name); k++) name = `${me.name.slice(0, 13)} ${k}`;
+    this.seats[i] = { name, face: me.face, human: true, send };
+    if (this.started) this.note(`${name} joined.`);
+    this.kick();
+    return true;
+  }
+
+  /** Someone left. The host leaving ends the table; anyone else is replaced by a computer player. */
+  leave(send: Send): void {
+    if (this.closed) return;
+    if (this.watcher === send || this.seats[0].send === send) {
+      for (const s of this.seats) if (s.send && s.send !== send) s.send({ t: 'closed', message: 'The host left the table.' });
+      this.close();
+      return;
+    }
+    const i = this.seats.findIndex((s) => s.send === send);
+    if (i < 0) return;
+    const used = new Set(this.seats.map((s) => s.name));
+    const p = pickPersona(used);
+    this.note(`${this.seats[i].name} left. ${p.name} takes the seat.`);
+    this.seats[i] = { ...p, human: false };
+    this.kick();
+  }
+
+  seatOf(send: Send): number { return this.seats.findIndex((s) => s.send === send); }
+
+  /** Re-run the loop after a seat changed between human and computer. */
+  private kick(): void {
+    if (!this.started) { this.push(); return; }
+    if (this.timer) clearTimeout(this.timer);
+    this.step();
+  }
 
   private newHand(): void {
     this.game.deal();
     const lead = this.game.forcedLead;
-    this.log = [`Hand ${this.game.handNo}: ${this.who(this.game.turn)} ${this.seats[this.game.turn].human ? 'lead' : 'leads'}${lead ? ' the ' + lead.join('-') : ''}.`];
+    const s = this.game.turn;
+    this.log = [`Hand ${this.game.handNo}: ${this.who(s)} ${this.you(s) ? 'lead' : 'leads'}${lead ? ' the ' + lead.join('-') : ''}.`];
     this.step();
   }
 
-  private who(seat: number): string { return this.seats[seat].human ? 'You' : this.seats[seat].name; }
+  /** On a one-person table the human is "You"; with several people everyone is shown by name. */
+  private you(seat: number): boolean { return this.seats[seat].human && !this.code; }
+  private who(seat: number): string { return this.you(seat) ? 'You' : this.seats[seat].name; }
 
-  /** Schedule what comes next: a computer move, the next hand, or wait for the human. */
+  /** Schedule what comes next: a computer move, the next hand, or wait for a human. */
   private step(): void {
     if (this.closed) return;
     this.push();
@@ -50,8 +120,8 @@ export class Table {
     if (g.handOver) { this.later(this.t.handPauseMs, () => this.newHand()); return; }
     const seat = this.seats[g.turn];
     if (seat.human) {
-      if (g.mustPass()) this.later(this.t.botMs, () => { this.note('You pass.'); g.pass(); this.step(); });
-      return; // wait for a play or draw from the human
+      if (g.mustPass()) this.later(this.t.botMs, () => { this.note(`${this.who(g.turn)} ${this.you(g.turn) ? 'pass' : 'passes'}.`); g.pass(); this.step(); });
+      return; // wait for a play or draw from that person
     }
     this.later(this.t.botMs, () => {
       const m = chooseMove(g);
@@ -62,14 +132,15 @@ export class Table {
     });
   }
 
-  private later(ms: number, fn: () => void): void { this.timer = setTimeout(fn, ms); }
+  private later(ms: number, fn: () => void): void { if (this.timer) clearTimeout(this.timer); this.timer = setTimeout(fn, ms); }
   private note(s: string): void { this.log.push(s); if (this.log.length > 30) this.log.shift(); }
 
   private doPlay(m: Move): void {
     const g = this.game;
     const seat = g.turn;
     const ev = g.play(m);
-    this.note(`${this.who(seat)} ${this.seats[seat].human ? 'play' : 'plays'} ${m.tile.join('-')}${ev.scored ? ` and ${this.seats[seat].human ? 'score' : 'scores'} ${ev.scored}!` : '.'}`);
+    const y = this.you(seat);
+    this.note(`${this.who(seat)} ${y ? 'play' : 'plays'} ${m.tile.join('-')}${ev.scored ? ` and ${y ? 'score' : 'scores'} ${ev.scored}!` : '.'}`);
     const r = g.lastResult;
     if (!r) return;
     if (g.over) this.note(`${this.teamName(g.winner!)} won ${Math.max(...g.scores)} to ${Math.min(...g.scores)}.`);
@@ -77,45 +148,69 @@ export class Table {
     else this.note(r.team === null ? 'Blocked. Tie, no points.' : `Blocked. +${r.points} for ${this.teamName(r.team)}.`);
   }
 
-  teamName(team: number): string {
+  /** Team name as the viewer sees it ("You" for their own seat). */
+  teamName(team: number, viewer = -1): string {
     const g = this.game;
-    if (g.n === 2) return this.who(team);
-    const [a, b] = [this.seats[team], this.seats[team + 2]];
-    return a.human ? 'You & ' + b.name : `${a.name} & ${b.name}`;
+    const nm = (i: number) => (i === viewer || (viewer < 0 && this.you(i)) ? 'You' : this.seats[i].name);
+    if (g.n === 2) return nm(team);
+    const [a, b] = [team, team + 2];
+    if (nm(b) === 'You') return `You & ${nm(a)}`;
+    return `${nm(a)} & ${nm(b)}`;
   }
 
-  /** Human actions. Ignored unless it's their turn and the move is legal. */
-  humanPlay(tile: Tile, arm: Move['arm']): void {
+  /** Human actions. Ignored unless it's that person's turn and the move is legal. */
+  humanPlay(send: Send, tile: Tile, arm: Move['arm']): void {
     const g = this.game;
-    if (this.watch || !this.seats[g.turn].human || g.handOver || g.over) return;
+    if (!this.started || this.closed || this.seatOf(send) !== g.turn || g.handOver || g.over) return;
     if (!g.moves().some((x) => sameTile(x.tile, tile) && x.arm === arm)) return;
     if (this.timer) clearTimeout(this.timer);
     this.doPlay({ tile, arm });
     this.step();
   }
-  humanDraw(): void {
+  humanDraw(send: Send): void {
     const g = this.game;
-    if (this.watch || !this.seats[g.turn].human || !g.canDraw()) return;
-    g.draw(); this.note('You draw.');
+    if (!this.started || this.closed || this.seatOf(send) !== g.turn || !g.canDraw()) return;
+    g.draw(); this.note(`${this.who(g.turn)} ${this.you(g.turn) ? 'draw' : 'draws'}.`);
     this.step();
   }
 
-  view(): unknown {
+  /** Lobby view for a code table before it starts. */
+  lobby(me: number): unknown {
+    return { t: 'lobby', code: this.code, n: this.game.n, host: me === 0, me,
+      seats: this.seats.map((s, i) => ({ name: i === me ? 'You' : s.name, face: s.face, human: s.human, host: !!s.host })) };
+  }
+
+  /** Game view for seat `me` (-1 = watching: no rotation, every hand face up). */
+  view(me = -1): unknown {
     const g = this.game;
-    const human = !this.watch;
+    const watch = me < 0;
+    const off = watch ? 0 : me;
+    const n = g.n;
+    const real = (i: number) => (i + off) % n;               // view seat -> real seat
+    const rot = (i: number) => (i - off + n) % n;            // real seat -> view seat
+    const myTeam = watch ? 0 : g.teamOf(me);
+    const rt = (team: number) => (myTeam === 0 ? team : 1 - team); // real team <-> view team (symmetric)
+    const r = g.lastResult;
+    const last = [...g.events].reverse().find((e) => e.kind === 'play') ?? null;
+    const mine = !watch && g.turn === me && !g.handOver && !g.over;
     return {
-      t: 'state', watch: this.watch, n: g.n, target: g.target, handNo: g.handNo, turn: g.turn,
-      scores: g.scores, teams: [this.teamName(0), this.teamName(1)],
-      seats: this.seats.map((s, i) => ({ name: s.name, face: s.face, human: s.human, count: g.hands[i].length, team: g.teamOf(i) })),
-      hand: human ? g.hands[0] : null,
-      allHands: this.watch ? g.hands : null, // watch mode shows every hand face up
+      t: 'state', watch, n, target: g.target, handNo: g.handNo, turn: rot(g.turn), code: this.code,
+      scores: [g.scores[rt(0)], g.scores[rt(1)]], teams: [this.teamName(rt(0), me), this.teamName(rt(1), me)],
+      seats: Array.from({ length: n }, (_, v) => { const s = this.seats[real(v)]; return { name: real(v) === me ? 'You' : s.name, face: s.face, human: s.human, count: g.hands[real(v)].length, team: rt(g.teamOf(real(v))) }; }),
+      hand: watch ? null : g.hands[me],
+      allHands: watch ? g.hands : null, // watch mode shows every hand face up
       board: g.board, boneyard: g.boneyard.length,
-      moves: human && g.turn === 0 && !g.handOver && !g.over ? g.moves() : [],
-      canDraw: human && g.turn === 0 && g.canDraw(),
-      result: g.lastResult, winner: g.winner, log: this.log.slice(-6),
-      lastPlay: [...g.events].reverse().find((e) => e.kind === 'play') ?? null,
+      moves: mine ? g.moves() : [],
+      canDraw: !watch && g.turn === me && g.canDraw(),
+      result: r ? { ...r, team: r.team === null ? null : rt(r.team), pipsLeft: Array.from({ length: n }, (_, v) => r.pipsLeft[real(v)]) } : null,
+      winner: g.winner === null ? null : rt(g.winner), log: this.log.slice(-6),
+      lastPlay: last ? { ...last, seat: rot(last.seat) } : null,
     };
   }
 
-  private push(): void { if (!this.closed) this.send(this.view()); }
+  private push(): void {
+    if (this.closed) return;
+    this.seats.forEach((s, i) => { if (s.send) s.send(this.started ? this.view(i) : this.lobby(i)); });
+    if (this.watcher) this.watcher(this.view(-1));
+  }
 }

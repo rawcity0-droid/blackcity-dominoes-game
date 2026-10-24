@@ -59,8 +59,6 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .pill.w .pname, .pill.e .pname { max-width: clamp(58px, 12vw, 96px); font-size: 11px; }
 .pstat { font-size: 11px; color: #b4cdbd; white-space: nowrap; }
 .center { grid-area: c; width: 100%; height: 100%; min-width: 0; display: flex; align-items: center; justify-content: center; overflow: hidden; position: relative; }
-.center.scroll { overflow: auto; align-items: flex-start; justify-content: flex-start; }
-.center.scroll .line { margin: auto; }
 .info { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; min-height: 30px; padding: 2px 4px 6px; }
 .score-pop { background: var(--gold); color: #1b1b12; font-weight: 900; border-radius: 999px; padding: 3px 12px; font-size: 15px; animation: pop .25s ease-out; z-index: 3; white-space: nowrap; }
 .count { text-align: right; font-size: 12px; color: #cfe3d6; }
@@ -113,3 +111,15 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .av-opt .avatar { width: 48px; height: 48px; }
 .av-opt .swatch { width: 40px; height: 40px; border-radius: 50%; display: block; }
 .av-actions { display: flex; gap: 10px; align-items: center; padding-top: 12px; }
+
+/* join code + owner */
+.join-row { display: flex; gap: 8px; }
+.code-in { flex: 1; min-width: 0; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.15); border-radius: 10px; padding: 9px 10px; color: #fff; font: 800 18px/1 var(--body); letter-spacing: .3em; text-transform: uppercase; text-align: center; }
+.btn.owner { border-color: var(--gold); color: var(--gold); }
+.join-code { font: 900 44px/1 var(--head); letter-spacing: .2em; color: var(--gold); background: rgba(10,36,24,.6); border: 2px dashed var(--gold); border-radius: 16px; padding: 12px 18px 12px 26px; user-select: all; }
+.lobby-seat { display: flex; align-items: center; gap: 10px; text-align: left; }
+.lobby-seat b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet.small { max-width: 340px; }
+.sheet input { width: 100%; font: 800 22px/1 var(--body); letter-spacing: .3em; text-align: center; padding: 10px; border-radius: 10px; border: 1px solid #bbb; }
+.field-error { color: #9b2c1f; font-size: 13px; min-height: 18px; padding-top: 6px; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #10291c; border: 1px solid var(--gold); color: #fff; padding: 10px 16px; border-radius: 12px; z-index: 30; font-size: 14px; max-width: 90vw; text-align: center; }
