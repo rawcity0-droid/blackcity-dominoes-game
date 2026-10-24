@@ -123,3 +123,4 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .sheet input { width: 100%; font: 800 22px/1 var(--body); letter-spacing: .3em; text-align: center; padding: 10px; border-radius: 10px; border: 1px solid #bbb; }
 .field-error { color: #9b2c1f; font-size: 13px; min-height: 18px; padding-top: 6px; }
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #10291c; border: 1px solid var(--gold); color: #fff; padding: 10px 16px; border-radius: 12px; z-index: 30; font-size: 14px; max-width: 90vw; text-align: center; }
+.face-btns { display: flex; gap: 8px; flex-wrap: wrap; } .face-btns .btn { flex: 1 1 0; min-width: 0; }

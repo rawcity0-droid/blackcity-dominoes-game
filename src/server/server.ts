@@ -24,7 +24,7 @@ export function startServer(port: number, timings: Timings = DEFAULT_TIMINGS, op
     if (req.url === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok'); return; }
     serveStatic(PUBLIC, req, res);
   });
-  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 4096 });
+  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 64 * 1024 });
   wss.on('connection', (ws, req) => {
     const id = 'c' + ++connNo;
     const ip = String(req.headers['x-forwarded-for'] ?? req.socket.remoteAddress ?? '').split(',')[0].trim();

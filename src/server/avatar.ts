@@ -13,6 +13,7 @@ const CODE_LEN = 1 + AVATAR_PARTS.length;
 
 /** The face id if it is a known preset or a well-formed custom code; anything else gives undefined. */
 export function validAvatar(v: unknown): string | undefined {
+  if (validPhoto(v)) return v as string;
   if (typeof v !== 'string' || v.length > CODE_LEN) return undefined;
   if ((PRESET_AVATARS as readonly string[]).includes(v)) return v;
   if (v.length !== CODE_LEN || v[0] !== 'c' || !/^c[0-9a-z]+$/.test(v)) return undefined;
@@ -30,4 +31,13 @@ export function fallbackAvatar(seed: string): string {
     code += (h % n).toString(36);
   }
   return code;
+}
+
+/** Longest photo accepted, in characters of the data URL (about 30 KB of picture). */
+export const MAX_PHOTO_CHARS = 40_000;
+const PHOTO_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+/** True for a player's own display picture: a small base64 JPEG, PNG or WebP data URL. */
+export function validPhoto(v: unknown): boolean {
+  return typeof v === 'string' && v.length <= MAX_PHOTO_CHARS && PHOTO_RE.test(v);
 }

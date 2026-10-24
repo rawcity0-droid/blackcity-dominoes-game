@@ -72,10 +72,11 @@ function toast(text) {
 function send(m) { const s = JSON.stringify(m); if (ws && ws.readyState === 1) ws.send(s); else queue.push(s); }
 
 // ---------- faces ----------
-const validFace = (f) => isCustom(f) || PRESETS.some(([id]) => id === f);
+const isPhoto = (f) => typeof f === 'string' && /^data:image\/(jpeg|png|webp);base64,/.test(f) && f.length <= 40000;
+const validFace = (f) => isPhoto(f) || isCustom(f) || PRESETS.some(([id]) => id === f);
 const myFace = () => (validFace(state.face) ? state.face : seededCode(state.name || 'You'));
 function facePhoto(face) {
-  return h('img', { src: isCustom(face) ? avatarSrc(face) : `/faces/${face}.jpg`, alt: '', draggable: 'false' });
+  return h('img', { src: isPhoto(face) ? face : isCustom(face) ? avatarSrc(face) : `/faces/${face}.jpg`, alt: '', draggable: 'false' });
 }
 const avatar = (face, cls = '') => h('div', { class: 'avatar ' + cls }, facePhoto(face));
 
@@ -113,7 +114,7 @@ function renderHome() {
     h('div', { class: 'sub', text: 'All Fives · Double-six · 7 tiles each' }),
     h('div', { class: 'card' },
       h('div', { class: 'me-row' }, me, nameIn),
-      btn('outline small', 'Customize avatar', openAvatarBuilder),
+      h('div', { class: 'face-btns' }, btn('outline small', 'Customize avatar', openAvatarBuilder), btn('outline small', '📷 Use my photo', pickPhoto)),
       h('div', { class: 'lab', text: 'Table' }), seg,
       h('div', { class: 'tiny', text: state.players === 4 ? 'You and your partner (across) vs. two players. All tiles dealt, no boneyard.' : 'Head to head. 14 tiles in the boneyard to draw from.' }),
       btn('gold', 'Play', () => start('play')),
@@ -331,9 +332,44 @@ function resultBanner(v) {
       : h('div', { class: 'tiny', text: 'Next hand coming up…' })));
 }
 
+// ---------- own photo: square crop, 128px, small JPEG kept on this device ----------
+function pickPhoto() {
+  const input = h('input', { type: 'file', accept: 'image/*', class: 'hidden' });
+  document.body.append(input); // some phones only open the picker for an input that is on the page
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    input.remove();
+    if (!file) return;
+    try { openPhotoPreview(await shrinkPhoto(file)); } catch { alert('That picture could not be opened. Try another one.'); }
+  });
+  input.click();
+}
+async function shrinkPhoto(file) {
+  // Read as a data URL (the page's security policy allows data: images, not blob:)
+  const url = await new Promise((ok, bad) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = bad; r.readAsDataURL(file); });
+  {
+    const img = await new Promise((ok, bad) => { const i = new Image(); i.onload = () => ok(i); i.onerror = bad; i.src = url; });
+    const side = Math.min(img.naturalWidth, img.naturalHeight);
+    const c = document.createElement('canvas'); c.width = c.height = 128;
+    c.getContext('2d').drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 128, 128);
+    for (const q of [0.8, 0.65, 0.5, 0.35]) { const d = c.toDataURL('image/jpeg', q); if (d.length <= 40000) return d; }
+    throw new Error('too big');
+  }
+}
+function openPhotoPreview(data) {
+  $modal.replaceChildren(h('div', { class: 'sheet small' }, h('h2', { text: 'Your photo' }),
+    h('div', { class: 'av-top' }, avatar(data, 'xl')),
+    h('div', { class: 'tiny', text: 'Everyone at your table will see this picture. It stays saved on this device only.' }),
+    h('div', { class: 'av-actions' },
+      btn('gold', 'Use this photo', () => { state.face = data; store.set('dom_face', data); closeModal(); render(); }),
+      btn('outline small', 'Pick another', pickPhoto),
+      btn('outline small', 'Cancel', closeModal))));
+  $modal.classList.remove('hidden');
+}
+
 // ---------- avatar builder (same parts and codes as Blackcity Spades) ----------
 function openAvatarBuilder() {
-  let code = isCustom(state.face) ? state.face : (state.face ? '' : myFace());
+  let code = isCustom(state.face) ? state.face : (state.face && !isPhoto(state.face) ? '' : seededCode(state.name || 'You'));
   let preset = code ? '' : state.face;
   let tab = 0;
   const preview = h('div', { class: 'avatar xl' });
@@ -359,7 +395,7 @@ function openAvatarBuilder() {
   }
   draw();
   $modal.replaceChildren(h('div', { class: 'sheet' }, h('h2', { text: 'Your avatar' }),
-    h('div', { class: 'av-top' }, preview, btn('outline small', '🎲 Surprise me', () => { preset = ''; code = randomCode(); draw(); })),
+    h('div', { class: 'av-top' }, preview, btn('outline small', '🎲 Surprise me', () => { preset = ''; code = randomCode(); draw(); }), btn('outline small', '📷 Use my photo', pickPhoto)),
     tabs, grid,
     h('div', { class: 'av-actions' },
       btn('gold', 'Save avatar', () => { state.face = current(); store.set('dom_face', state.face); closeModal(); render(); }),
