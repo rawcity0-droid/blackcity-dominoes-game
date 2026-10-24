@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: blackcity-dominoes
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev
+    startCommand: npm start
