@@ -5,13 +5,19 @@
 import { Game, Move, Tile, chooseMove, sameTile } from '../engine/dominoes.js';
 import { Persona, pickPersona } from './personas.js';
 
-export interface Timings { botMs: number; handPauseMs: number }
+export interface Timings { botMs: number; handPauseMs: number; reserveMs?: number }
 export const DEFAULT_TIMINGS: Timings = { botMs: 900, handPauseMs: 4500 };
+/** How long a seat stays saved for a person who closed the app, lost connection or stepped away. */
+export const RESERVE_MS = 10 * 60000;
+
+let tableNo = 0;
 
 export type Send = (msg: unknown) => void;
-export interface Seat extends Persona { human: boolean; send?: Send; host?: boolean }
+/** A human seat with no `send` is away: a computer plays it until the person returns (rejoin token) or the time runs out. */
+export interface Seat extends Persona { human: boolean; send?: Send; host?: boolean; token?: string; awayTimer?: NodeJS.Timeout }
 
 export class Table {
+  id = ++tableNo;
   game: Game;
   seats: Seat[];
   watch: boolean;
@@ -23,10 +29,12 @@ export class Table {
   private timer: NodeJS.Timeout | null = null;
   closed = false;
   private watcher: Send | null = null;
+  /** Owner looking in on a live game (sees every hand). */
+  private spectators = new Set<Send>();
   private onEmpty: () => void;
 
   constructor(
-    opts: { players: 2 | 4; watch: boolean; me?: Persona; target?: number; code?: string; onEmpty?: () => void },
+    opts: { players: 2 | 4; watch: boolean; me?: Persona; token?: string; target?: number; code?: string; onEmpty?: () => void },
     send: Send,
     private t: Timings = DEFAULT_TIMINGS,
   ) {
@@ -37,7 +45,7 @@ export class Table {
     const used = new Set<string>(opts.me ? [opts.me.name] : []);
     this.seats = [];
     for (let i = 0; i < opts.players; i++) {
-      if (i === 0 && !opts.watch && opts.me) { this.seats.push({ ...opts.me, human: true, send, host: true }); continue; }
+      if (i === 0 && !opts.watch && opts.me) { this.seats.push({ ...opts.me, human: true, send, host: true, token: opts.token }); continue; }
       const p = pickPersona(used); used.add(p.name);
       this.seats.push({ ...p, human: false });
     }
@@ -50,6 +58,7 @@ export class Table {
     if (this.closed) return;
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
+    for (const s of this.seats) if (s.awayTimer) clearTimeout(s.awayTimer);
     this.onEmpty();
   }
 
@@ -61,34 +70,86 @@ export class Table {
   }
 
   /** A person with the code takes the first computer seat. Returns false if the table is full. */
-  join(me: Persona, send: Send): boolean {
+  join(me: Persona, send: Send, token?: string): boolean {
     if (this.closed || !this.code) return false;
     const i = this.seats.findIndex((s) => !s.human);
     if (i < 0) return false;
     let name = me.name;
     for (let k = 2; this.seats.some((s) => s.name === name); k++) name = `${me.name.slice(0, 13)} ${k}`;
-    this.seats[i] = { name, face: me.face, human: true, send };
+    this.seats[i] = { name, face: me.face, human: true, send, token };
     if (this.started) this.note(`${name} joined.`);
     this.kick();
     return true;
   }
 
-  /** Someone left. The host leaving ends the table; anyone else is replaced by a computer player. */
-  leave(send: Send): void {
+  /** A connection went away (closed app, lost signal, back to menu). Players keep their seat for a while. */
+  away(send: Send): void {
     if (this.closed) return;
-    if (this.watcher === send || this.seats[0].send === send) {
-      for (const s of this.seats) if (s.send && s.send !== send) s.send({ t: 'closed', message: 'The host left the table.' });
+    if (this.spectators.delete(send)) return;
+    if (this.watcher === send) { this.close(); return; }
+    const i = this.seatOf(send);
+    if (i < 0) return;
+    const s = this.seats[i];
+    if (!s.token) { this.drop(i); return; } // no rejoin token: they can't come back, so free the seat now
+    s.send = undefined;
+    if (this.code && this.started) this.note(`${s.name} stepped away. A computer plays for them.`);
+    if (s.awayTimer) clearTimeout(s.awayTimer);
+    s.awayTimer = setTimeout(() => this.drop(i), this.t.reserveMs ?? RESERVE_MS);
+    s.awayTimer.unref(); // a saved seat never keeps the server process alive on its own
+    this.kick();
+  }
+
+  /** The person with this token comes back to their seat. Returns false if there is no such seat. */
+  resume(token: string, send: Send): boolean {
+    const i = this.seats.findIndex((s) => s.human && s.token === token);
+    if (this.closed || i < 0) return false;
+    const s = this.seats[i];
+    if (s.send && s.send !== send) s.send({ t: 'closed', message: 'Your game was opened on another screen.' });
+    if (s.awayTimer) clearTimeout(s.awayTimer);
+    s.awayTimer = undefined;
+    s.send = send;
+    if (this.code && this.started) this.note(`${s.name} is back.`);
+    this.kick();
+    return true;
+  }
+
+  /** Gives up a seat for good (said no to returning, started another game, or the saved time ran out). */
+  forfeit(token: string): void {
+    const i = this.seats.findIndex((s) => s.human && s.token === token);
+    if (i >= 0) this.drop(i);
+  }
+
+  /** The host leaving ends the table; anyone else is replaced by a computer player. */
+  private drop(i: number): void {
+    if (this.closed) return;
+    const gone = this.seats[i];
+    if (gone.awayTimer) clearTimeout(gone.awayTimer);
+    if (i === 0 && !this.watch) {
+      for (const s of this.seats) if (s.send && s !== gone) s.send({ t: 'closed', message: 'The host left the table.' });
       this.close();
       return;
     }
-    const i = this.seats.findIndex((s) => s.send === send);
-    if (i < 0) return;
     const used = new Set(this.seats.map((s) => s.name));
     const p = pickPersona(used);
-    this.note(`${this.seats[i].name} left. ${p.name} takes the seat.`);
+    this.note(`${gone.name} left. ${p.name} takes the seat.`);
     this.seats[i] = { ...p, human: false };
     this.kick();
   }
+
+  /** Owner looks in on this table. */
+  spectate(send: Send): void { if (!this.closed) { this.spectators.add(send); send(this.spectatorView()); } }
+
+  /** Short description for the "Return to your game" button and the owner's table list. */
+  summary(token?: string): unknown {
+    const g = this.game;
+    const me = token ? this.seats.findIndex((s) => s.human && s.token === token) : -1;
+    const mine = me >= 0 ? g.teamOf(me) : 0;
+    return { id: this.id, n: g.n, code: this.code, started: this.started, handNo: g.handNo, over: g.over,
+      scores: [g.scores[mine], g.scores[1 - mine]],
+      people: this.seats.filter((s) => s.human).map((s) => ({ name: s.name, here: !!s.send })) };
+  }
+
+  hasToken(token: string): boolean { return !this.closed && this.seats.some((s) => s.human && s.token === token); }
 
   seatOf(send: Send): number { return this.seats.findIndex((s) => s.send === send); }
 
@@ -118,8 +179,10 @@ export class Table {
     const g = this.game;
     if (g.over) return;
     if (g.handOver) { this.later(this.t.handPauseMs, () => this.newHand()); return; }
+    // Nobody at the table (solo game, app closed): wait for them instead of playing on without them.
+    if (!this.seats.some((s) => s.send) && !this.watcher) return;
     const seat = this.seats[g.turn];
-    if (seat.human) {
+    if (seat.human && seat.send) {
       if (g.mustPass()) this.later(this.t.botMs, () => { this.note(`${this.who(g.turn)} ${this.you(g.turn) ? 'pass' : 'passes'}.`); g.pass(); this.step(); });
       return; // wait for a play or draw from that person
     }
@@ -212,5 +275,10 @@ export class Table {
     if (this.closed) return;
     this.seats.forEach((s, i) => { if (s.send) s.send(this.started ? this.view(i) : this.lobby(i)); });
     if (this.watcher) this.watcher(this.view(-1));
+    if (this.spectators.size) { const v = this.spectatorView(); for (const s of this.spectators) s(v); }
+  }
+
+  private spectatorView(): unknown {
+    return this.started ? { ...(this.view(-1) as object), spectate: true } : this.lobby(-1);
   }
 }

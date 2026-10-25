@@ -17,6 +17,8 @@ export interface ServerOpts { ownerCode?: string }
 export function startServer(port: number, timings: Timings = DEFAULT_TIMINGS, opts: ServerOpts = {}): Promise<http.Server> {
   const gate = new OwnerGate('ownerCode' in opts ? opts.ownerCode : process.env.OWNER_CODE);
   const coded = new Map<string, Table>();
+  const live = new Set<Table>(); // every game being played, for rejoining and the owner's list
+  const tableWith = (token: string) => [...live].find((t) => t.hasToken(token));
   const join = new Map<string, number[]>(); // wrong join-code tries per IP
   let connNo = 0;
 
@@ -35,7 +37,12 @@ export function startServer(port: number, timings: Timings = DEFAULT_TIMINGS, op
       const name = typeof m.name === 'string' && m.name.trim() ? m.name.trim().slice(0, 16) : 'Player';
       return { name, face: validAvatar(m.face) ?? fallbackAvatar(name) };
     };
-    const leave = () => { table?.leave(send); table = null; };
+    // Rejoin token: random, made by the browser and kept in localStorage. Only used to find this person's seat again.
+    const tokenOf = (m: any) => (typeof m.token === 'string' && /^[A-Za-z0-9-]{16,64}$/.test(m.token) ? m.token : undefined);
+    const leave = () => { table?.away(send); table = null; };
+    // Starting something new gives up any seat this person still had saved.
+    const fresh = (token?: string) => { leave(); if (token) tableWith(token)?.forfeit(token); };
+    const track = (t: Table) => { live.add(t); return t; };
     send({ t: 'hello', ownerAvailable: gate.available });
 
     ws.on('message', (raw) => {
@@ -55,22 +62,27 @@ export function startServer(port: number, timings: Timings = DEFAULT_TIMINGS, op
           send({ t: 'ownerStatus', owner });
           return;
         case 'start': {
-          leave();
+          const token = tokenOf(m);
+          fresh(token);
           const me = persona(m);
-          table = new Table({ players, watch: m.mode === 'watch', me: { name: m.name ? me.name : 'You', face: me.face } }, send, timings);
+          const watch = m.mode === 'watch';
+          const t: Table = new Table({ players, watch, me: { name: m.name ? me.name : 'You', face: me.face }, token, onEmpty: () => live.delete(t) }, send, timings);
+          table = watch ? t : track(t);
           return;
         }
         case 'host': { // owner only: a table others can join with a code
-          leave();
+          const token = tokenOf(m);
+          fresh(token);
           if (!owner) { send({ t: 'error', code: 'not_owner', message: 'Only the owner can host a code table.' }); return; }
           const code = makeJoinCode((c) => coded.has(c));
-          const t: Table = new Table({ players, watch: false, me: persona(m), code, onEmpty: () => coded.delete(code) }, send, timings);
+          const t: Table = new Table({ players, watch: false, me: persona(m), token, code, onEmpty: () => { coded.delete(code); live.delete(t); } }, send, timings);
           coded.set(code, t);
-          table = t;
+          table = track(t);
           return;
         }
         case 'join': {
-          leave();
+          const token = tokenOf(m);
+          fresh(token);
           const now = Date.now();
           const tries = (join.get(ip) ?? []).filter((x) => now - x < 60000);
           join.set(ip, tries);
@@ -78,9 +90,42 @@ export function startServer(port: number, timings: Timings = DEFAULT_TIMINGS, op
           const code = typeof m.code === 'string' ? m.code.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8) : '';
           const t = coded.get(code);
           if (!t || t.closed) { tries.push(now); send({ t: 'joinResult', ok: false, message: 'No table with that code.' }); return; }
-          if (!t.join(persona(m), send)) { send({ t: 'joinResult', ok: false, message: 'That table is full.' }); return; }
+          if (!t.join(persona(m), send, token)) { send({ t: 'joinResult', ok: false, message: 'That table is full.' }); return; }
           table = t;
           send({ t: 'joinResult', ok: true, code });
+          return;
+        }
+        case 'check': { // home screen: is there a game to return to?
+          const token = tokenOf(m);
+          const t = token ? tableWith(token) : undefined;
+          send({ t: 'resumable', ok: !!t, game: t ? t.summary(token) : null });
+          return;
+        }
+        case 'resume': {
+          const token = tokenOf(m);
+          const t = token ? tableWith(token) : undefined;
+          if (!t || t === table) { if (!t) send({ t: 'resumeResult', ok: false, message: 'That game has ended.' }); return; }
+          leave();
+          t.resume(token!, send);
+          table = t;
+          send({ t: 'resumeResult', ok: true });
+          return;
+        }
+        case 'forfeit': { // said no to returning
+          const token = tokenOf(m);
+          if (token) tableWith(token)?.forfeit(token);
+          send({ t: 'resumable', ok: false, game: null });
+          return;
+        }
+        case 'tables': // owner: list games in progress
+          if (owner) send({ t: 'tables', list: [...live].map((t) => t.summary()) });
+          return;
+        case 'spectate': { // owner: look in on a game in progress
+          const t = [...live].find((x) => x.id === m.id);
+          if (!owner || !t) return;
+          leave();
+          t.spectate(send);
+          table = t;
           return;
         }
         case 'begin': table?.begin(send); return;

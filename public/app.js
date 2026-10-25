@@ -6,6 +6,17 @@ const $app = document.getElementById('app');
 const $modal = document.getElementById('modal');
 const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }, del: (k) => { try { localStorage.removeItem(k); } catch {} } };
 
+// Rejoin token: a random id kept on this device (separate from the name) so you can get back to your seat.
+function rejoinToken() {
+  let t = store.get('dom_rejoin');
+  if (!t || !/^[A-Za-z0-9-]{16,64}$/.test(t)) {
+    t = (crypto.randomUUID ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join(''));
+    store.set('dom_rejoin', t);
+  }
+  return t;
+}
+const token = rejoinToken();
+
 const state = {
   name: '', // never prefilled: shared phones must not show the last player's name
   face: store.get('dom_face') || '',
@@ -17,6 +28,8 @@ const state = {
   owner: false,    // owner mode on this device (hidden panel + OWNER_CODE)
   ownerAvailable: false,
   joinCode: '',
+  resume: null,     // game this device can return to (from the server), or null
+  reconnecting: false,
 };
 
 /** Tiny element helper. */
@@ -41,7 +54,7 @@ function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
   ws.onopen = () => { while (queue.length) ws.send(queue.shift()); };
   ws.onmessage = (e) => onMessage(JSON.parse(e.data));
-  ws.onclose = () => { setTimeout(connect, 1500); if (state.screen !== 'home') { state.screen = 'home'; toast('Connection lost. Back at the menu.'); render(); } };
+  ws.onclose = () => { setTimeout(connect, 1500); if (state.screen !== 'home') { state.reconnecting = true; toast('Connection lost. Reconnecting…'); } };
 }
 function onMessage(m) {
   switch (m.t) {
@@ -49,8 +62,20 @@ function onMessage(m) {
       state.ownerAvailable = m.ownerAvailable;
       const pass = store.get('dom_owner');
       if (pass) send({ t: 'ownerPass', pass }); else state.owner = false;
+      send({ t: 'check', token });
       return;
     }
+    case 'resumable':
+      state.resume = m.ok && !m.game.over ? m.game : null;
+      if (state.reconnecting) { // came back after losing connection: go straight back to the seat
+        state.reconnecting = false;
+        if (state.resume) { send({ t: 'resume', token }); return; }
+        if (state.screen !== 'home') { state.screen = 'home'; toast('That game has ended.'); }
+      }
+      if (state.screen === 'home') render();
+      return;
+    case 'resumeResult': if (!m.ok) { state.resume = null; state.screen = 'home'; toast(m.message); render(); } return;
+    case 'tables': showTables(m.list); return;
     case 'ownerStatus':
       state.owner = m.owner;
       if (!m.owner) store.del('dom_owner');
@@ -112,6 +137,7 @@ function renderHome() {
     h('h1', { class: 'title', text: 'DOMINOES', onclick: ownerTap }),
     h('div', { class: 'hero' }, svgEl(tileSvg(6, 6, true)), svgEl(tileSvg(5, 0, true)), svgEl(tileSvg(3, 2, true))),
     h('div', { class: 'sub', text: 'All Fives · Double-six · 7 tiles each' }),
+    resumeCard(),
     h('div', { class: 'card' },
       h('div', { class: 'me-row' }, me, nameIn),
       h('div', { class: 'face-btns' }, btn('outline small', 'Customize avatar', openAvatarBuilder), btn('outline small', '📷 Use my photo', pickPhoto)),
@@ -124,9 +150,27 @@ function renderHome() {
     h('div', { class: 'tiny', text: 'Score when the open ends add up to 5, 10, 15… First to 150 wins.' })));
 }
 
+/** "Return to your game" when this device still has a seat saved at a game. */
+function resumeCard() {
+  const g = state.resume;
+  if (!g) return null;
+  const what = `${g.code ? 'Code table ' + g.code : g.n + '-player game'} · ${g.started ? `Hand ${g.handNo} · ${g.scores[0]} to ${g.scores[1]}` : 'waiting to start'}`;
+  return h('div', { class: 'card resume' },
+    h('div', { class: 'lab', text: 'Game in progress' }),
+    h('div', { class: 'tiny', text: what }),
+    btn('gold', 'Return to your game', resumeGame),
+    btn('outline small', 'No thanks, end it', () => { if (confirm('Leave that game for good? A computer player takes your seat.')) { state.resume = null; send({ t: 'forfeit', token }); render(); } }));
+}
+function resumeGame() {
+  state.screen = 'table'; state.view = null; state.lobby = null; state.selected = null;
+  send({ t: 'resume', token });
+  render();
+}
+
 function start(mode) {
   state.screen = 'table'; state.view = null; state.selected = null;
-  send({ t: 'start', mode, players: state.players, name: state.name || 'You', face: myFace() });
+  if (mode === 'play') state.resume = null; // a new game replaces the saved one
+  send({ t: 'start', mode, players: state.players, name: state.name || 'You', face: myFace(), token });
   render();
 }
 function joinRow() {
@@ -135,7 +179,8 @@ function joinRow() {
   const go = () => {
     if (input.value.length < 5) { toast('Enter the 5-character code.'); input.focus(); return; }
     state.screen = 'lobby'; state.lobby = null; state.view = null; state.selected = null;
-    send({ t: 'join', code: input.value, name: state.name || 'Player', face: myFace() });
+    state.resume = null;
+    send({ t: 'join', code: input.value, name: state.name || 'Player', face: myFace(), token });
     render();
   };
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
@@ -143,7 +188,8 @@ function joinRow() {
 }
 function host() {
   state.screen = 'lobby'; state.lobby = null; state.view = null; state.selected = null;
-  send({ t: 'host', players: state.players, name: state.name || 'Host', face: myFace() });
+  state.resume = null;
+  send({ t: 'host', players: state.players, name: state.name || 'Host', face: myFace(), token });
   render();
 }
 
@@ -168,11 +214,22 @@ function openOwnerPanel() {
   input.addEventListener('input', () => { input.value = input.value.replace(/\D/g, '').slice(0, 6); ownerMsg(''); });
   input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
   const rows = state.owner
-    ? [h('p', { text: 'Owner mode is on for this device. You can host tables with a join code.' }), h('div', { class: 'av-actions' }, btn('outline small', 'Turn off on this device', () => { store.del('dom_owner'); state.owner = false; send({ t: 'ownerPass', pass: '' }); closeModal(); render(); }), btn('gold small', 'Close', closeModal))]
+    ? [h('p', { text: 'Owner mode is on for this device. You can host tables with a join code, or look in on games being played.' }), h('div', { class: 'av-actions' }, btn('gold small', 'Games in progress', () => send({ t: 'tables' })), btn('outline small', 'Turn off on this device', () => { store.del('dom_owner'); state.owner = false; send({ t: 'ownerPass', pass: '' }); closeModal(); render(); }), btn('gold small', 'Close', closeModal))]
     : [input, msg, h('div', { class: 'av-actions' }, btn('gold', 'Unlock', go), btn('outline small', 'Close', closeModal))];
   $modal.replaceChildren(h('div', { class: 'sheet small' }, h('h2', { text: 'Owner' }), ...rows));
   $modal.classList.remove('hidden');
   if (!state.owner) input.focus();
+}
+/** Owner: games being played right now. "Look in" shows the table with every hand face up. */
+function showTables(list) {
+  const rows = list.length ? list.map((g) => h('div', { class: 'lobby-seat' },
+    h('div', {}, h('b', { text: g.people.map((p) => p.name + (p.here ? '' : ' (away)')).join(', ') || 'Computer players' }),
+      h('div', { class: 'tiny', text: `${g.code ? 'Code ' + g.code : 'Solo'} · ${g.n} players · ${g.started ? `hand ${g.handNo}, ${g.scores[0]}–${g.scores[1]}` : 'in lobby'}${g.over ? ' · finished' : ''}` })),
+    btn('outline small', 'Look in', () => { closeModal(); state.screen = 'table'; state.view = null; state.lobby = null; send({ t: 'spectate', id: g.id }); render(); })))
+    : [h('p', { text: 'No games right now.' })];
+  $modal.replaceChildren(h('div', { class: 'sheet small' }, h('h2', { text: 'Games in progress' }), ...rows,
+    h('div', { class: 'av-actions' }, btn('outline small', 'Refresh', () => send({ t: 'tables' })), btn('gold small', 'Close', closeModal))));
+  $modal.classList.remove('hidden');
 }
 function onOwnerResult(m) {
   if (m.ok) {
@@ -196,7 +253,8 @@ function renderLobby() {
       btn('outline small', 'Leave', toMenu))));
 }
 
-function toMenu() { send({ t: 'leave' }); state.screen = 'home'; render(); }
+// Your seat stays saved for 10 minutes, so the home screen offers "Return to your game".
+function toMenu() { send({ t: 'leave' }); send({ t: 'check', token }); state.screen = 'home'; render(); }
 
 // ---------- table ----------
 const seatPos = (v, i) => (v.n === 2 ? (i === 0 ? 's' : 'n') : ['s', 'w', 'n', 'e'][i]);
@@ -208,7 +266,7 @@ function renderTable() {
   const top = h('div', { class: 'topbar' },
     h('button', { class: 'roundbtn', type: 'button', 'aria-label': 'Back to the menu', text: '‹', onclick: toMenu }),
     [0, 1].map((t) => h('div', { class: 'sbox' + (!v.watch && t === 0 ? ' mine' : '') }, h('div', { class: 'num', text: String(v.scores[t]) }), h('div', { class: 'nm', text: v.teams[t] }))),
-    h('div', { class: 'target', text: v.watch ? `Watching · to ${v.target}` : `to ${v.target}` }));
+    h('div', { class: 'target', text: v.spectate ? `Owner view · to ${v.target}` : v.watch ? `Watching · to ${v.target}` : `to ${v.target}` }));
 
   const felt = h('div', { class: 'felt' });
   v.seats.forEach((s, i) => {
@@ -237,7 +295,7 @@ function renderTable() {
   if (v.watch) {
     parts.push(h('div', { class: 'watch-hands' }, v.allHands.map((hand, i) =>
       h('div', { class: 'row' }, h('b', { text: v.seats[i].name }), hand.map((t) => svgEl(tileSvg(t[0], t[1])))))));
-    parts.push(h('div', { class: 'actions' }, btn('outline small', 'New watch table', () => start('watch'))));
+    if (!v.spectate) parts.push(h('div', { class: 'actions' }, btn('outline small', 'New watch table', () => start('watch'))));
   } else {
     const okIds = new Set(myMoves.map((m) => tid(m.tile)));
     parts.push(h('div', { class: 'hand' }, (v.hand || []).map((t) => {
@@ -327,7 +385,8 @@ function resultBanner(v) {
   else { big = 'Blocked'; small = r.team === null ? 'Tie on pips. No points.' : `Fewest pips: +${r.points} for ${v.teams[r.team]}`; }
   return h('div', { class: 'banner' }, h('div', {}, h('div', { class: 'big', text: big }), h('div', { text: small }),
     h('div', { class: 'tiny', text: 'Pips left: ' + r.pipsLeft.map((p, i) => `${who(v, i)} ${p}`).join(' · ') }),
-    v.winner !== null
+    v.winner !== null && v.spectate ? h('div', { class: 'actions' }, btn('outline small', 'Menu', toMenu))
+    : v.winner !== null
       ? h('div', { class: 'actions' }, btn('gold small', v.watch ? 'Watch another' : 'Play again', () => start(v.watch ? 'watch' : 'play')), btn('outline small', 'Menu', toMenu))
       : h('div', { class: 'tiny', text: 'Next hand coming up…' })));
 }
@@ -409,4 +468,4 @@ function render() { if (state.screen === 'home') renderHome(); else if (state.sc
 window.addEventListener('resize', () => { if (state.screen === 'table') render(); });
 connect();
 render();
-window.__dom = { state, start, host };
+window.__dom = { state, start, host, token };
